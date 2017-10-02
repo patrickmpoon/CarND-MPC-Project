@@ -12,11 +12,6 @@
 // for convenience
 using json = nlohmann::json;
 
-// For converting back and forth between radians and degrees.
-constexpr double pi() { return M_PI; }
-double deg2rad(double x) { return x * pi() / 180; }
-double rad2deg(double x) { return x * 180 / pi(); }
-
 // Checks if the SocketIO event has JSON data.
 // If there is data the JSON object in string format will be returned,
 // else the empty string "" will be returned.
@@ -68,7 +63,6 @@ Eigen::VectorXd polyfit(Eigen::VectorXd xvals, Eigen::VectorXd yvals,
 int main() {
   uWS::Hub h;
 
-  // MPC is initialized here!
   MPC mpc;
 
   h.onMessage([&mpc](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
@@ -91,6 +85,7 @@ int main() {
           double py = j[1]["y"];
           double psi = j[1]["psi"];
           double v = j[1]["speed"];
+          double steering_angle = j[1]["steering_angle"]; // in radians
 
           /*
           * TODO: Calculate steering angle and throttle using MPC.
@@ -98,47 +93,72 @@ int main() {
           * Both are in between [-1, 1].
           *
           */
-          double steer_value;
-          double throttle_value;
+
+          // Transform global ref coords to car
+          Eigen::VectorXd x(ptsx.size());
+          Eigen::VectorXd y(ptsy.size());
+
+          for (unsigned int i = 0; i < ptsx.size(); i++){
+            x[i] = (ptsx[i] - px) * cos(psi) + (ptsy[i] - py) * sin(psi);
+            y[i] = (ptsy[i] - py) * cos(psi) - (ptsx[i] - px) * sin(psi);
+          }
+
+          auto coeffs = polyfit(x, y, 3);
+
+          // Convert velocity from mph to m/s
+          v *= MPH_to_METERS_PER_SECOND;
+
+          double latency = 0.1;
+
+          psi = -(v * (steering_angle / Lf) * latency);
+          px = v * cos(psi) * latency;
+          py = v * sin(psi) * latency;
+
+          double cte = polyeval(coeffs, px);
+
+          // calculate the orientation error
+          Eigen::VectorXd delta_coeffs(3);
+          delta_coeffs << coeffs[1], 2.0 * coeffs[2], 3.0 * coeffs[3];
+
+          double psi_des = atan(polyeval(delta_coeffs, px));
+          double epsi = -psi_des;
+
+          Eigen::VectorXd state(6);
+          state << px, py, psi, v, cte, epsi;
+
+          mpc.Solve(state, coeffs);
 
           json msgJson;
           // NOTE: Remember to divide by deg2rad(25) before you send the steering value back.
           // Otherwise the values will be in between [-deg2rad(25), deg2rad(25] instead of [-1, 1].
-          msgJson["steering_angle"] = steer_value;
-          msgJson["throttle"] = throttle_value;
+          msgJson["steering_angle"] = mpc.steer_value;
+          msgJson["throttle"] = mpc.throttle_value;
 
-          //Display the MPC predicted trajectory 
-          vector<double> mpc_x_vals;
-          vector<double> mpc_y_vals;
-
+          //Display the MPC predicted trajectory
           //.. add (x,y) points to list here, points are in reference to the vehicle's coordinate system
           // the points in the simulator are connected by a Green line
-
-          msgJson["mpc_x"] = mpc_x_vals;
-          msgJson["mpc_y"] = mpc_y_vals;
+          msgJson["mpc_x"] = mpc.x_predictions;
+          msgJson["mpc_y"] = mpc.y_predictions;
 
           //Display the waypoints/reference line
           vector<double> next_x_vals;
           vector<double> next_y_vals;
+          for(int i = 0; i < 100; i += 5) {
+            next_x_vals.push_back(i * 1.0);
+            next_y_vals.push_back(polyeval(coeffs, i));
+          }
 
           //.. add (x,y) points to list here, points are in reference to the vehicle's coordinate system
           // the points in the simulator are connected by a Yellow line
-
           msgJson["next_x"] = next_x_vals;
           msgJson["next_y"] = next_y_vals;
 
-
           auto msg = "42[\"steer\"," + msgJson.dump() + "]";
           std::cout << msg << std::endl;
+
           // Latency
           // The purpose is to mimic real driving conditions where
           // the car does actuate the commands instantly.
-          //
-          // Feel free to play around with this value but should be to drive
-          // around the track with 100ms latency.
-          //
-          // NOTE: REMEMBER TO SET THIS TO 100 MILLISECONDS BEFORE
-          // SUBMITTING.
           this_thread::sleep_for(chrono::milliseconds(100));
           ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
         }
